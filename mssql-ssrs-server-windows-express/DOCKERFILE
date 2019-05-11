@@ -1,0 +1,82 @@
+FROM mcr.microsoft.com/windows/servercore:1803
+
+LABEL maintainer "Fabian Schmidt"
+
+# Download Links:
+# SQL 2017 Express
+ENV sql_express_download_url "https://go.microsoft.com/fwlink/?linkid=829176"
+
+# SQL 2017 CU14 KB4484710
+# https://www.microsoft.com/en-us/download/details.aspx?id=56128
+ENV sql_cu_download_url "https://download.microsoft.com/download/C/4/F/C4F908C9-98ED-4E5F-88D5-7D6A5004AEBD/SQLServer2017-KB4484710-x64.exe"
+
+# SSRS - https://www.microsoft.com/en-us/download/details.aspx?id=55252
+ENV ssrs_download_url "https://download.microsoft.com/download/E/6/4/E6477A2A-9B58-40F7-8AD6-62BB8491EA78/SQLServerReportingServices.exe"
+
+# Ola Hallengren - SQL Server Maintenance Solution
+ENV sql_maintenance_download_url "https://ola.hallengren.com/scripts/MaintenanceSolution.sql"
+
+ENV sa_password="_" \
+    attach_dbs="[]" \
+    ACCEPT_EULA="_" \
+    sa_password_path="C:\ProgramData\Docker\secrets\sa-password"
+
+SHELL ["powershell", "-Command", "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue';"]
+
+# make install files accessible
+COPY SQLEXPR_x64_ENU.exe /sqlexpress.exe
+COPY SQLServer2017-KB4484710-x64.exe /sqlpatch.exe
+COPY SQLServerReportingServices.exe /SQLServerReportingServices.exe
+WORKDIR /
+
+#RUN      Invoke-WebRequest -Uri $env:sql_express_download_url -OutFile sqlexpress.exe ; \
+#        Invoke-WebRequest -Uri $env:ssrs_download_url -OutFile SQLServerReportingServices.exe ; \
+#        Invoke-WebRequest -Uri $env:sql_cu_download_url -OutFile sqlpatch.exe ; \
+RUN     'SQL install' ; \
+        Start-Process -Wait -FilePath .\sqlexpress.exe -ArgumentList /qs, /x:setup ; \
+        .\setup\setup.exe /q /Action=Install /InstanceName=SQLEXPRESS /FEATURES=SQLEngine /UPDATEENABLED=0 /SQLSVCACCOUNT='NT AUTHORITY\System' /SQLSYSADMINACCOUNTS='BUILTIN\ADMINISTRATORS' /TCPENABLED=1 /NPENABLED=0 /IACCEPTSQLSERVERLICENSETERMS /ERRORREPORTING=0 ; \
+        'SQL patch' ; \
+        Start-Process -Wait -FilePath .\sqlpatch.exe -ArgumentList /quiet, /x:patch ; \
+        .\patch\setup.exe /q /Action=Patch /IAcceptSQLServerLicenseTerms /AllInstances ; \
+        'SSRS install' ; \
+        Start-Process -Wait -FilePath .\SQLServerReportingServices.exe -ArgumentList /quiet, /norestart, /IAcceptLicenseTerms, /Edition=Expr ; \
+        'Clean-up' ; \
+        Remove-Item -Recurse -Force sqlexpress.exe, setup, SQLServerReportingServices.exe, sqlpatch.exe, patch ; 
+#        Remove-Item -Force 'C:\Program Files\Microsoft SQL Server Reporting Services\SSRS\LogFiles\*' ;
+#    Set-Service 'MSSQL$SQLEXPRESS' -startuptype manual ; \
+#    Set-Service 'SQLTELEMETRY$SQLEXPRESS' -startuptype manual ; \
+#    Set-Service 'SQLWriter' -startuptype manual ; \
+#    Set-Service 'SQLBrowser' -startuptype manual ; \
+
+COPY MaintenanceSolution.sql /
+
+#RUN     Invoke-WebRequest -Uri $env:sql_maintenance_download_url -OutFile MaintenanceSolution.sql ; \
+RUN     Start-Process -Wait -FilePath sqlcmd -ArgumentList '-i', 'MaintenanceSolution.sql' ; \
+        Remove-Item -Recurse -Force MaintenanceSolution.sql
+
+RUN     'Find-PackageProvider' ; \
+        Find-PackageProvider -Name 'Nuget' -ForceBootstrap -IncludeDependencies ; \
+        'Set-PSRepository' ; \
+        Set-PSRepository -Name 'PSGallery' -InstallationPolicy Trusted ; \
+        'Install-Module' ; \
+        Install-Module -Name 'ReportingServicesTools' ; \
+        'Set-RsUrlReservation' ; \
+        Set-RsUrlReservation -ReportServerVersion SQLServer2017 -ReportServerInstance 'SSRS' -ReportServerVirtualDirectory 'ReportServer' -PortalVirtualDirectory 'Reports' -ListeningPort 80 ;
+
+RUN     Stop-Service SQLServerReportingServices ; \
+        Stop-Service MSSQL`$SQLEXPRESS ; \
+        set-itemproperty -path 'HKLM:\software\microsoft\microsoft sql server\mssql14.SQLEXPRESS\mssqlserver\supersocketnetlib\tcp\ipall' -name tcpdynamicports -value '' ; \
+        set-itemproperty -path 'HKLM:\software\microsoft\microsoft sql server\mssql14.SQLEXPRESS\mssqlserver\supersocketnetlib\tcp\ipall' -name tcpport -value 1433 ; \
+        set-itemproperty -path 'HKLM:\software\microsoft\microsoft sql server\mssql14.SQLEXPRESS\mssqlserver\\' -name LoginMode -value 2 ;
+
+RUN     mkdir Log ; \
+        mkdir Config ; \
+        mkdir Data ; \
+        mkdir Backup ;
+
+COPY t2embed.dll /windows/system32/t2embed.dll
+COPY start.ps1 /
+
+HEALTHCHECK CMD [ "sqlcmd", "-Q", "select 1" ]
+
+CMD .\start -sa_password $env:sa_password -ACCEPT_EULA $env:ACCEPT_EULA -attach_dbs \"$env:attach_dbs\" -Verbose
